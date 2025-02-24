@@ -47,7 +47,7 @@ const enviarEmail = async (destinatario, assunto, texto) => {
 // Função para incrementar a dívida
 const incrementarDivida = async () => {
   try {
-    // Busca todas as dívidas no banco de dados
+    // Busca Todas as dívidas no banco de dados
     const [rows] = await db.promise().query("SELECT id, divida, ultima_atualizacao FROM dividas");
 
     if (rows.length === 0) {
