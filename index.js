@@ -6,9 +6,10 @@ const cors = require("cors");
 const mysql = require("mysql2");
 
 const app = express();
-app.use(cors({ origin: "https://ende-app.vercel.app", credentials: true }));
+app.use(cors({ origin: "https://ende-app.netlify.app", credentials: true }));
 app.use(express.json());
 
+// Configuração do banco de dados
 const db = mysql.createConnection({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -16,6 +17,7 @@ const db = mysql.createConnection({
   database: process.env.DB_NAME,
   port: process.env.DB_PORT
 });
+
 
 db.connect(err => {
   if (err) {
@@ -27,18 +29,38 @@ db.connect(err => {
 
 module.exports = db;
 
-// Configuração do Nodemailer para envio de e-mails
+
+
+db.connect(err => {
+  if (err) {
+    console.error('Erro ao conectar no banco:', err);
+  } else {
+    console.log('Conectado ao MySQL do Clever Cloud!');
+  }
+});
+
+module.exports = db;
+
+// Configuração do Nodemailer
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
   port: process.env.EMAIL_PORT,
-  secure: false, // true para 465, false para outras portas
+  secure: false,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
 });
 
-// Função para enviar e-mail
+// Constantes de tempo
+const INTERVALO_INCREMENTO = 300000; // 5 minutos em milissegundos
+const TEMPO_AVISO_INCREMENTO = 180000; // Aviso no 2º minuto (3 minutos antes)
+const TEMPO_LED_AMARELO = 60000; // 1 minuto para o LED amarelo
+
+// Variável para controle do intervalo
+let intervaloIncremento;
+
+// Funções auxiliares
 const enviarEmail = async (destinatario, assunto, texto) => {
   try {
     const info = await transporter.sendMail({
@@ -53,43 +75,114 @@ const enviarEmail = async (destinatario, assunto, texto) => {
   }
 };
 
-// Função para incrementar a dívida
+const enviarConfirmacaoPagamento = async (destinatario, valorPago, novaDivida) => {
+  const assunto = "Confirmação de Pagamento";
+  const texto = `Seu pagamento de ${valorPago} Kz foi recebido com sucesso! Sua nova dívida é de ${novaDivida} Kz.`;
+  await enviarEmail(destinatario, assunto, texto);
+};
+
+const enviarNotificacaoDivida = async (dividaAtual) => {
+  let assunto, texto;
+  
+  if (dividaAtual > 20 && dividaAtual <= 40) {
+    assunto = "Aviso de Dívida Pendente";
+    texto = `Sua dívida atual é de ${dividaAtual} Kz. Por favor, regularize seu pagamento.`;
+  } else if (dividaAtual > 40 && dividaAtual <= 50) {
+    assunto = "Dívida Elevada";
+    texto = `ATENÇÃO: Sua dívida está em ${dividaAtual} Kz. A dívida está ficando demasiado elevada.`;
+  } else if (dividaAtual > 50) {
+    assunto = "Dívida Crítica";
+    texto = `URGENTE: Sua dívida atingiu ${dividaAtual} Kz. Liquide a dívida para evitar interrupção no serviço.`;
+  }
+
+  if (assunto && texto) {
+    await enviarEmail(process.env.EMAIL_TO, assunto, texto);
+  }
+};
+
+const registrarHistoricoDivida = async (id_divida, valor_divida) => {
+  await db.promise().query(
+    "INSERT INTO historico_dividas (id_divida, valor_divida) VALUES (?, ?)",
+    [id_divida, valor_divida]
+  );
+
+  // Limita o histórico aos últimos 20 registros
+  const [historico] = await db.promise().query(
+    `SELECT id FROM historico_dividas 
+     WHERE id_divida = ? 
+     ORDER BY data_registro DESC 
+     LIMIT 20`, 
+    [id_divida]
+  );
+
+  const idsParaManter = historico.map(row => row.id);
+
+  if (idsParaManter.length > 0) {
+    await db.promise().query(
+      `DELETE FROM historico_dividas 
+       WHERE id_divida = ? 
+       AND id NOT IN (${idsParaManter.join(",")})`, 
+      [id_divida]
+    );
+  }
+};
+
+// Função principal para incrementar dívidas
 const incrementarDivida = async () => {
   try {
-    // Busca Todas as dívidas no banco de dados
-    const [rows] = await db.promise().query("SELECT id, divida, ultima_atualizacao FROM dividas");
+    const [ids] = await db.promise().query("SELECT id FROM dividas");
 
-    if (rows.length === 0) {
-      console.log("Nenhuma dívida encontrada.");
-      return;
-    }
-
-    // Itera sobre cada dívida
-    for (const divida of rows) {
-      const novaDivida = divida.divida + 10; // Incremento de 10 Kz
-
-      // Envia e-mail 1 minuto antes do incremento
-      const assunto = "Aviso: Incremento de Dívida";
-      const texto = `Sua dívida será incrementada em 10 Kz em 1 minuto. A nova dívida será de ${novaDivida} Kz.`;
-      await enviarEmail(process.env.EMAIL_TO, assunto, texto);
-
-      console.log(`E-mail enviado para ${process.env.EMAIL_TO} sobre o incremento da dívida ID ${divida.id}.`);
-
-      // Aguarda 1 minuto antes de incrementar a dívida
+    for (const row of ids) {
+      // Busca o valor atual para cada dívida
+      const [currentDebt] = await db.promise().query(
+        "SELECT divida FROM dividas WHERE id = ?", 
+        [row.id]
+      );
+      
+      const novaDivida = currentDebt[0].divida + 10;
+      
+      // Envia aviso 3 minutos antes
       setTimeout(async () => {
-        await db.promise().query("UPDATE dividas SET divida = ?, ultima_atualizacao = NOW() WHERE id = ?", [novaDivida, divida.id]);
-        console.log(`Dívida do ID ${divida.id} incrementada para ${novaDivida} Kz.`);
-      }, 60000); // 1 minuto
+        const assunto = "Aviso: Incremento de Dívida em 2 minutos";
+        const texto = `Sua dívida será incrementada em 10 Kz em 2 minutos. Nova dívida: ${novaDivida} Kz.`;
+        await enviarEmail(process.env.EMAIL_TO, assunto, texto);
+      }, TEMPO_AVISO_INCREMENTO);
+
+      // Incrementa após 5 minutos
+      setTimeout(async () => {
+        // Verifica novamente o valor atual antes de incrementar
+        const [verificacao] = await db.promise().query(
+          "SELECT divida FROM dividas WHERE id = ?", 
+          [row.id]
+        );
+        
+        const valorAtual = verificacao[0].divida;
+        const novoValor = valorAtual + 10;
+        
+        await db.promise().query(
+          "UPDATE dividas SET divida = ?, ultima_atualizacao = NOW() WHERE id = ?", 
+          [novoValor, row.id]
+        );
+        
+        await registrarHistoricoDivida(row.id, novoValor);
+        await enviarNotificacaoDivida(novoValor);
+        
+        console.log(`Dívida ID ${row.id} incrementada para ${novoValor} Kz.`);
+      }, INTERVALO_INCREMENTO);
     }
   } catch (error) {
     console.error("Erro ao incrementar dívida:", error);
   }
 };
 
-// Agenda o incremento da dívida a cada 3 minutos
-setInterval(incrementarDivida, 180000); // 3 minutos = 180000 ms
+// Inicia o intervalo de incremento
+const iniciarIntervaloIncremento = () => {
+  if (intervaloIncremento) clearInterval(intervaloIncremento);
+  intervaloIncremento = setInterval(incrementarDivida, INTERVALO_INCREMENTO);
+  console.log(`Incremento de dívida configurado para cada ${INTERVALO_INCREMENTO/60000} minutos`);
+};
 
-// Endpoint para obter a dívida atual
+// Endpoints
 app.get("/divida/:id", async (req, res) => {
   const { id } = req.params;
 
@@ -105,7 +198,6 @@ app.get("/divida/:id", async (req, res) => {
   }
 });
 
-// Endpoint para subtrair valor da dívida
 app.post("/divida/:id/subtrair", async (req, res) => {
   const { id } = req.params;
   const { valor } = req.body;
@@ -127,13 +219,20 @@ app.post("/divida/:id/subtrair", async (req, res) => {
 
     const novaDivida = dividaAtual - valor;
 
-    // Atualiza a dívida no banco
-    await db.promise().query("UPDATE dividas SET divida = ?, ultima_atualizacao = NOW() WHERE id = ?", [novaDivida, id]);
+    await db.promise().query(
+      "UPDATE dividas SET divida = ?, ultima_atualizacao = NOW() WHERE id = ?", 
+      [novaDivida, id]
+    );
 
-    // Registra o pagamento no histórico
-    await db.promise().query("INSERT INTO historico_pagamentos (id_divida, valor_pago) VALUES (?, ?)", [id, valor]);
+    await registrarHistoricoDivida(id, novaDivida);
+    await db.promise().query(
+      "INSERT INTO historico_pagamentos (id_divida, valor_pago) VALUES (?, ?)", 
+      [id, valor]
+    );
+    
+    await enviarConfirmacaoPagamento(process.env.EMAIL_TO, valor, novaDivida);
 
-    // Mantém apenas os últimos 15 registros no histórico
+    // Limita o histórico de pagamentos aos últimos 15 registros
     const [historico] = await db.promise().query(
       `SELECT id FROM historico_pagamentos 
        WHERE id_divida = ? 
@@ -160,7 +259,22 @@ app.post("/divida/:id/subtrair", async (req, res) => {
   }
 });
 
-// Endpoint para obter histórico de pagamentos
+app.get("/historico-divida/:id", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [rows] = await db.promise().query(
+      "SELECT valor_divida, data_registro FROM historico_dividas WHERE id_divida = ? ORDER BY data_registro ASC",
+      [id]
+    );
+
+    res.json({ historico: rows });
+  } catch (error) {
+    console.error("Erro ao buscar histórico de dívida:", error);
+    res.status(500).json({ message: "Erro ao obter histórico" });
+  }
+});
+
 app.get("/historico-pagamentos/:id", async (req, res) => {
   const { id } = req.params;
 
@@ -177,30 +291,31 @@ app.get("/historico-pagamentos/:id", async (req, res) => {
   }
 });
 
-// Endpoint para verificar se a dívida foi incrementada
 app.get("/divida/:id/incrementada", async (req, res) => {
   const { id } = req.params;
 
   try {
-    const [rows] = await db.promise().query("SELECT ultima_atualizacao FROM dividas WHERE id = ?", [id]);
+    const [rows] = await db.promise().query(
+      "SELECT ultima_atualizacao FROM dividas WHERE id = ?", 
+      [id]
+    );
 
     if (rows.length === 0) return res.status(404).json({ message: "Dívida não encontrada" });
 
     const ultimaAtualizacao = new Date(rows[0].ultima_atualizacao);
     const agora = new Date();
-    const diferencaEmMinutos = Math.floor((agora - ultimaAtualizacao) / (1000 * 60)); // Diferença em minutos
-
-    // Se a dívida foi atualizada nos últimos 1 minuto, retorne true
-    if (diferencaEmMinutos <= 1) {
-      return res.json({ incrementada: true });
-    } else {
-      return res.json({ incrementada: false });
-    }
+    const diferenca = agora - ultimaAtualizacao;
+    
+    // Considera como incrementada se foi nos últimos 1 minuto
+    res.json({ incrementada: diferenca <= TEMPO_LED_AMARELO });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Erro ao verificar incremento da dívida" });
+    res.status(500).json({ message: "Erro ao verificar incremento" });
   }
 });
 
-// Inicia o servidor
-app.listen(5000, () => console.log("Servidor rodando na porta 5000"));
+// Inicia o servidor e o intervalo de incremento
+app.listen(5000, () => {
+  console.log("Servidor rodando na porta 5000");
+  iniciarIntervaloIncremento();
+});
