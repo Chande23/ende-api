@@ -1,0 +1,9 @@
+﻿# Ignora a pasta node_modules
+node_modules/
+
+# Ignora arquivos de ambiente (credenciais, variáveis de configuração)
+.env
+
+# Ignora arquivos de log
+*.log
+
